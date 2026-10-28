@@ -64,9 +64,14 @@ function drawPlaceholder(
 }
 
 function markerColor(style: MapMarkerStyle): string {
-  if (style === 'locked') return '#f07167'
-  if (style === 'answer') return '#e8c547'
-  return '#7ec8a3'
+  if (style === 'locked') return '#e53935'
+  if (style === 'answer') return '#f5c518'
+  return '#e53935'
+}
+
+function markerRadius(style: MapMarkerStyle): number {
+  if (style === 'locked' || style === 'answer') return 14
+  return 12
 }
 
 function sizeCanvasFromImage(
@@ -131,18 +136,18 @@ export function mountMapView(
       const style = m.style ?? 'live'
       const px = m.uv.x * w
       const py = m.uv.y * h
-      const r = style === 'locked' || style === 'answer' ? 10 : 7
+      const r = markerRadius(style)
       ctx.beginPath()
       ctx.arc(px, py, r, 0, Math.PI * 2)
       ctx.fillStyle = markerColor(style)
       ctx.fill()
       ctx.strokeStyle = '#fff'
-      ctx.lineWidth = 2
+      ctx.lineWidth = 3
       ctx.stroke()
       if (m.label) {
         ctx.fillStyle = '#fff'
-        ctx.font = '11px "IBM Plex Sans", system-ui, sans-serif'
-        ctx.fillText(m.label, px + 12, py - 8)
+        ctx.font = '12px "IBM Plex Sans", system-ui, sans-serif'
+        ctx.fillText(m.label, px + 16, py - 10)
       }
     }
   }

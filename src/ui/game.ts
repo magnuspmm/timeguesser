@@ -44,18 +44,36 @@ import {
   yearTimelineCenterLine,
   yearTimelineTicks,
 } from '../vision/yearField'
+import { playCountdownTick, playPlace, resumeAudio } from '../audio/sfx'
 import { printRoundScore } from '../print/client'
 import { mountMapView, type MapView } from './mapView'
 import { renderNav } from './nav'
 
-type Phase = 'playing' | 'revealed' | 'done'
+type Phase = 'pick' | 'playing' | 'revealed' | 'done'
+
+type SettleTracker = {
+  prev: Point2 | null
+  moved: boolean
+  stableSince: number | null
+}
+
+type YearSettleTracker = {
+  prev: number | null
+  moved: boolean
+  stableSince: number | null
+}
+
+const MAP_SETTLE_DELTA = 0.008
+const MAP_SETTLE_MS = 200
+const YEAR_SETTLE_DELTA = 1
+const YEAR_SETTLE_MS = 200
 
 export function mountGame(root: HTMLElement): void {
   let stream: MediaStream | null = null
   let calib = loadCalibration()
   let challenges: Challenge[] = []
   let index = 0
-  let phase: Phase = 'playing'
+  let phase: Phase = 'pick'
   let lastTrack: TrackResult | null = null
   let lastMap: Point2 | null = null
   let lastYearTrack: TrackResult | null = null
@@ -68,6 +86,17 @@ export function mountGame(root: HTMLElement): void {
   let mapView: MapView | null = null
   let stoneSnapshot: StoneTouchSnapshot | null = null
   const stoneDetector = new StoneTouchDetector()
+  const mapSettle: SettleTracker = {
+    prev: null,
+    moved: false,
+    stableSince: null,
+  }
+  const yearSettle: YearSettleTracker = {
+    prev: null,
+    moved: false,
+    stableSince: null,
+  }
+  let lastCountdownSec: number | null = null
 
   const processCanvas = document.createElement('canvas')
 
@@ -97,29 +126,37 @@ export function mountGame(root: HTMLElement): void {
         <a href="#/challenges">Opprett utfordringer</a>
       </p>
 
-      <div class="game-play" id="playView">
+      <div class="game-pick" id="pickView" hidden>
+        <div class="pick-header panel">
+          <h2>Velg utfordring</h2>
+          <p class="meta" id="pickMeta">Klikk på et bilde for å starte</p>
+        </div>
+        <div class="challenge-pick-grid" id="challengePickGrid"></div>
+      </div>
+
+      <div class="game-play" id="playView" hidden>
         <div class="game-layout">
           <section class="game-main">
-            <div class="challenge-hero panel">
+            <div class="panel">
               <div class="row challenge-progress">
-                <h2 id="challengeTitle">Utfordring</h2>
+                <h2>Kamera</h2>
                 <span class="meta" id="progressMeta"></span>
               </div>
-              <div class="challenge-image-wrap">
-                <img id="challengeImage" alt="Utfordringsbilde" hidden />
-                <p class="meta" id="challengePlaceholder">Ingen utfordring</p>
+              <div class="video-wrap" id="videoWrap">
+                <video id="video" playsinline autoplay muted></video>
+                <canvas id="overlay"></canvas>
               </div>
+              <p id="hint" class="hint"></p>
             </div>
           </section>
 
           <aside class="sidebar game-sidebar">
             <div class="panel">
-              <h2>Kamera</h2>
-              <div class="video-wrap video-wrap-compact" id="videoWrap">
-                <video id="video" playsinline autoplay muted></video>
-                <canvas id="overlay"></canvas>
+              <h2 id="challengeTitle">Utfordring</h2>
+              <div class="challenge-image-wrap challenge-image-wrap-sm">
+                <img id="challengeImage" alt="Utfordringsbilde" hidden />
+                <p class="meta" id="challengePlaceholder">Ingen utfordring</p>
               </div>
-              <p id="hint" class="hint"></p>
             </div>
 
             <div class="panel" id="yearPanel" hidden>
@@ -197,7 +234,7 @@ export function mountGame(root: HTMLElement): void {
         <h2>Ferdig</h2>
         <p class="score-value" id="finalScore">0</p>
         <p class="meta" id="finalScoreMeta"></p>
-        <button type="button" class="btn primary" id="restartBtn">Spill på nytt</button>
+        <button type="button" class="btn primary" id="restartBtn">Velg utfordring</button>
       </div>
 
       <canvas id="mapCanvas" width="320" height="179" hidden></canvas>
@@ -210,6 +247,9 @@ export function mountGame(root: HTMLElement): void {
   const calibWarn = root.querySelector<HTMLElement>('#calibWarn')!
   const yearCalibWarn = root.querySelector<HTMLElement>('#yearCalibWarn')!
   const emptyWarn = root.querySelector<HTMLElement>('#emptyWarn')!
+  const pickView = root.querySelector<HTMLElement>('#pickView')!
+  const challengePickGrid = root.querySelector<HTMLElement>('#challengePickGrid')!
+  const pickMeta = root.querySelector<HTMLElement>('#pickMeta')!
   const playView = root.querySelector<HTMLElement>('#playView')!
   const resultView = root.querySelector<HTMLElement>('#resultView')!
   const doneView = root.querySelector<HTMLElement>('#doneView')!
@@ -250,6 +290,82 @@ export function mountGame(root: HTMLElement): void {
     statusEl.textContent = text
   }
 
+  function resetSettleTrackers(): void {
+    mapSettle.prev = null
+    mapSettle.moved = false
+    mapSettle.stableSince = null
+    yearSettle.prev = null
+    yearSettle.moved = false
+    yearSettle.stableSince = null
+    lastCountdownSec = null
+  }
+
+  function updateMapSettle(uv: Point2 | null, nowMs: number): void {
+    if (!uv) {
+      mapSettle.prev = null
+      mapSettle.moved = false
+      mapSettle.stableSince = null
+      return
+    }
+    if (!mapSettle.prev) {
+      mapSettle.prev = { ...uv }
+      mapSettle.moved = false
+      mapSettle.stableSince = null
+      return
+    }
+    const dx = uv.x - mapSettle.prev.x
+    const dy = uv.y - mapSettle.prev.y
+    const dist = Math.hypot(dx, dy)
+    mapSettle.prev = { ...uv }
+    if (dist > MAP_SETTLE_DELTA) {
+      mapSettle.moved = true
+      mapSettle.stableSince = null
+      return
+    }
+    if (!mapSettle.moved) return
+    if (mapSettle.stableSince === null) {
+      mapSettle.stableSince = nowMs
+      return
+    }
+    if (nowMs - mapSettle.stableSince >= MAP_SETTLE_MS) {
+      playPlace()
+      mapSettle.moved = false
+      mapSettle.stableSince = null
+    }
+  }
+
+  function updateYearSettle(year: number | null, nowMs: number): void {
+    if (year === null) {
+      yearSettle.prev = null
+      yearSettle.moved = false
+      yearSettle.stableSince = null
+      return
+    }
+    if (yearSettle.prev === null) {
+      yearSettle.prev = year
+      yearSettle.moved = false
+      yearSettle.stableSince = null
+      return
+    }
+    const delta = Math.abs(year - yearSettle.prev)
+    yearSettle.prev = year
+    if (delta >= YEAR_SETTLE_DELTA) {
+      yearSettle.moved = true
+      yearSettle.stableSince = null
+      return
+    }
+    if (!yearSettle.moved) return
+    if (yearSettle.stableSince === null) {
+      yearSettle.stableSince = nowMs
+      return
+    }
+    if (nowMs - yearSettle.stableSince >= YEAR_SETTLE_MS) {
+      playPlace()
+      yearSettle.moved = false
+      yearSettle.stableSince = null
+    }
+  }
+
   function isMapCalibrated(): boolean {
     return Boolean(calib.cameraToMap && calib.cameraCorners)
   }
@@ -279,13 +395,17 @@ export function mountGame(root: HTMLElement): void {
   }
 
   function showPhaseViews(): void {
+    pickView.hidden = phase !== 'pick'
     playView.hidden = phase !== 'playing'
     resultView.hidden = phase !== 'revealed'
     doneView.hidden = phase !== 'done'
+    gameApp.classList.toggle('is-pick', phase === 'pick')
     gameApp.classList.toggle('is-result', phase === 'revealed')
     gameApp.classList.toggle('is-done', phase === 'done')
 
-    if (phase === 'playing') {
+    if (phase === 'pick') {
+      pageTagline.textContent = 'Velg utfordring'
+    } else if (phase === 'playing') {
       pageTagline.textContent = 'Spill'
       placeMap(playMapSlot)
       mapView?.setLine(null, null)
@@ -295,6 +415,64 @@ export function mountGame(root: HTMLElement): void {
     } else {
       pageTagline.textContent = 'Ferdig'
     }
+  }
+
+  function renderPickGrid(): void {
+    challengePickGrid.innerHTML = ''
+    for (const [i, c] of challenges.entries()) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'challenge-pick-card'
+      btn.setAttribute('aria-label', `Spill utfordring ${c.id}`)
+      btn.innerHTML = `
+        <img class="challenge-pick-image" src="/${c.image}" alt="" />
+        <span class="challenge-pick-label">
+          <strong>${c.id}</strong>
+        </span>
+      `
+      btn.addEventListener('click', () => startChallenge(i))
+      challengePickGrid.appendChild(btn)
+    }
+  }
+
+  function goToPick(): void {
+    phase = 'pick'
+    index = 0
+    lockedPlayer = null
+    lockedYear = null
+    lastMap = null
+    lastYear = null
+    playStatus.textContent = ''
+    stoneStatus.textContent = ''
+    stoneSnapshot = null
+    stoneDetector.reset()
+    resetSettleTrackers()
+    mapView?.setMarkers([])
+    mapView?.setLine(null, null)
+    updateChrome()
+    setStatus(challenges.length ? 'Velg utfordring' : 'Ingen utfordringer')
+  }
+
+  function startChallenge(challengeIndex: number): void {
+    if (challengeIndex < 0 || challengeIndex >= challenges.length) return
+    index = challengeIndex
+    phase = 'playing'
+    lockedPlayer = null
+    lockedYear = null
+    lastMap = null
+    lastYear = null
+    playStatus.textContent = ''
+    stoneStatus.textContent = ''
+    stoneSnapshot = null
+    stoneDetector.reset()
+    resetSettleTrackers()
+    void resumeAudio()
+    mapView?.setMarkers([])
+    mapView?.setLine(null, null)
+    updateChrome()
+    sizeOverlay()
+    setStatus('Klar')
+    if (!stream) void startCamera()
   }
 
   function updateChrome(): void {
@@ -307,10 +485,19 @@ export function mountGame(root: HTMLElement): void {
       isYearFieldCalibrated(calib) ||
       total === 0 ||
       phase !== 'playing'
-    emptyWarn.hidden = total > 0 || phase !== 'playing'
+    emptyWarn.hidden = total > 0 || (phase !== 'pick' && phase !== 'playing')
     yearPanel.hidden = !needsYear || phase !== 'playing'
 
     showPhaseViews()
+
+    if (phase === 'pick') {
+      pickMeta.textContent =
+        total === 0
+          ? 'Ingen utfordringer å velge'
+          : 'Klikk på et bilde for å starte'
+      renderPickGrid()
+      return
+    }
 
     if (phase === 'playing') {
       if (!c) {
@@ -368,8 +555,7 @@ export function mountGame(root: HTMLElement): void {
       resultProgress.textContent = `${index + 1} / ${total}`
       resultChallengeTitle.textContent = c.id
       resultChallengeImage.src = `/${c.image}`
-      nextBtn.textContent =
-        index + 1 >= challenges.length ? 'Se totalsum' : 'Neste utfordring'
+      nextBtn.textContent = 'Neste utfordring'
       return
     }
 
@@ -694,6 +880,10 @@ export function mountGame(root: HTMLElement): void {
       lastYear = null
     }
 
+    const now = performance.now()
+    updateMapSettle(lastMap, now)
+    updateYearSettle(needsYear ? lastYear : null, now)
+
     if (isStoneCalibrated(calib) && calib.stone.rect && calib.stone.baseline) {
       stoneDetector.threshold = calib.stone.diffThreshold
       const canArm =
@@ -711,7 +901,6 @@ export function mountGame(root: HTMLElement): void {
         calib.stone.baselineW,
         calib.stone.baselineH,
       )
-      const now = performance.now()
       if (sample && canArm) {
         const diff = roiDiff(
           Float32Array.from(calib.stone.baseline),
@@ -719,7 +908,19 @@ export function mountGame(root: HTMLElement): void {
         )
         const { locked, snapshot } = stoneDetector.update(diff, now)
         stoneSnapshot = snapshot
+        if (
+          snapshot.phase === 'countdown' &&
+          snapshot.countdownSec !== null &&
+          snapshot.countdownSec > 0 &&
+          snapshot.countdownSec !== lastCountdownSec
+        ) {
+          playCountdownTick(snapshot.countdownSec)
+          lastCountdownSec = snapshot.countdownSec
+        } else if (snapshot.phase !== 'countdown') {
+          lastCountdownSec = null
+        }
         if (locked) {
+          lastCountdownSec = null
           lockAnswer()
           stoneDetector.resetAfterLock(now)
         }
@@ -729,6 +930,7 @@ export function mountGame(root: HTMLElement): void {
           sample.data,
         )
         stoneDetector.reset()
+        lastCountdownSec = null
         stoneSnapshot = {
           phase: 'idle',
           diff,
@@ -737,9 +939,11 @@ export function mountGame(root: HTMLElement): void {
           countdownProgress: 0,
         }
       } else {
+        lastCountdownSec = null
         stoneSnapshot = null
       }
     } else {
+      lastCountdownSec = null
       stoneSnapshot = null
     }
 
@@ -786,6 +990,7 @@ export function mountGame(root: HTMLElement): void {
     playStatus.textContent = ''
     stoneStatus.textContent = ''
     stoneSnapshot = null
+    resetSettleTrackers()
     showReveal(lockedPlayer, c, lockedYear)
     updateChrome()
     setStatus(`${lastRoundScore} poeng`)
@@ -793,58 +998,19 @@ export function mountGame(root: HTMLElement): void {
   }
 
   lockBtn.addEventListener('click', () => {
+    void resumeAudio()
     lockAnswer()
   })
 
   nextBtn.addEventListener('click', () => {
     if (phase !== 'revealed') return
-
-    if (index + 1 >= challenges.length) {
-      phase = 'done'
-      lockedPlayer = null
-      lockedYear = null
-      lastYear = null
-      mapView?.setMarkers([])
-      mapView?.setLine(null, null)
-      updateChrome()
-      setStatus('Ferdig')
-      return
-    }
-
-    index += 1
-    phase = 'playing'
-    lockedPlayer = null
-    lockedYear = null
-    lastMap = null
-    lastYear = null
-    playStatus.textContent = ''
-    stoneStatus.textContent = ''
-    stoneSnapshot = null
-    stoneDetector.reset()
-    mapView?.setMarkers([])
-    mapView?.setLine(null, null)
-    updateChrome()
-    sizeOverlay()
-    setStatus('Klar')
+    goToPick()
   })
 
   restartBtn.addEventListener('click', () => {
-    index = 0
     totalScore = 0
     lastRoundScore = 0
-    lockedPlayer = null
-    lockedYear = null
-    lastMap = null
-    lastYear = null
-    stoneSnapshot = null
-    stoneDetector.reset()
-    stoneStatus.textContent = ''
-    phase = challenges.length ? 'playing' : 'done'
-    mapView?.setMarkers([])
-    mapView?.setLine(null, null)
-    updateChrome()
-    sizeOverlay()
-    setStatus(challenges.length ? 'Klar' : 'Ingen utfordringer')
+    goToPick()
   })
 
   window.addEventListener('resize', sizeOverlay)
@@ -854,9 +1020,9 @@ export function mountGame(root: HTMLElement): void {
   void (async () => {
     calib = loadCalibration()
     challenges = (await fetchChallenges()).challenges
-    phase = challenges.length ? 'playing' : 'done'
+    phase = 'pick'
     updateChrome()
-    if (phase === 'playing') await startCamera()
+    if (challenges.length) await startCamera()
     raf = requestAnimationFrame(tick)
   })()
 

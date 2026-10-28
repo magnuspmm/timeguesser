@@ -451,6 +451,72 @@ body {
   color: var(--accent);
 }
 
+.pick-header {
+  margin-bottom: 1.25rem;
+}
+
+.pick-header h2 {
+  margin: 0 0 0.25rem;
+}
+
+.challenge-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.challenge-pick-card {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+  font: inherit;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.challenge-pick-card:hover,
+.challenge-pick-card:focus-visible {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  outline: none;
+}
+
+.challenge-pick-image {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: #0a120e;
+}
+
+.challenge-pick-label {
+  display: block;
+  padding: 0.65rem 0.75rem;
+  min-width: 0;
+}
+
+.challenge-pick-label strong {
+  display: block;
+  font-weight: 600;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .game-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.75fr);
@@ -494,6 +560,10 @@ body {
   object-fit: contain;
 }
 
+.game-main .video-wrap {
+  margin-bottom: 0.5rem;
+}
+
 .stone-status {
   min-height: 1.25em;
   color: var(--accent);
@@ -524,11 +594,11 @@ body {
 }
 
 .legend-you {
-  background: #f07167;
+  background: #e53935;
 }
 
 .legend-fasit {
-  background: #e8c547;
+  background: #f5c518;
 }
 
 .result-layout {
